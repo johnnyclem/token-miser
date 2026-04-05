@@ -1,5 +1,6 @@
 import chalk from "chalk";
-import { compare } from "../../harness/manager.js";
+import { compare, attributeSessions, type HarnessMetrics } from "../../harness/manager.js";
+import { parseSessions } from "../../analyzer/parser.js";
 import type { Harness } from "../../analyzer/types.js";
 
 function formatVal(val: string | number | undefined, fallback = "—"): string {
@@ -8,6 +9,7 @@ function formatVal(val: string | number | undefined, fallback = "—"): string {
 }
 
 function diffIndicator(a: number, b: number, lowerIsBetter = true): string {
+  if (a === 0 && b === 0) return chalk.gray(" =");
   if (a === b) return chalk.gray(" =");
   const better = lowerIsBetter ? b < a : b > a;
   const delta = ((b - a) / (a || 1)) * 100;
@@ -51,6 +53,22 @@ export async function runCompare(nameA: string, nameB: string): Promise<void> {
   const a = result.a;
   const b = result.b;
 
+  // Parse real sessions and attribute them by timestamp ranges
+  const sessions = await parseSessions();
+  const metrics = attributeSessions(a, b, sessions);
+
+  // Determine chronological order for display
+  const aFirst = new Date(a.savedAt).getTime() <= new Date(b.savedAt).getTime();
+  const earlierLabel = aFirst ? a.name : b.name;
+  const laterLabel = aFirst ? b.name : a.name;
+
+  console.log(chalk.gray(`  Sessions attributed by timestamp:`));
+  console.log(chalk.gray(`    ${earlierLabel} (saved ${(aFirst ? a : b).savedAt.slice(0, 10)}) → ${metrics.a.sessions > metrics.b.sessions ? metrics.a.sessions : metrics.b.sessions} sessions before`));
+  console.log(chalk.gray(`    ${laterLabel} (saved ${(aFirst ? b : a).savedAt.slice(0, 10)}) → ${aFirst ? metrics.b.sessions : metrics.a.sessions} sessions after`));
+  console.log();
+
+  // Metrics table — use live session-derived metrics
+  console.log(chalk.bold("  Session Metrics (live)"));
   console.log(chalk.gray("  ─────────────────────────────────────────────────────────"));
   printRow("", chalk.bold(a.name), chalk.bold(b.name), chalk.gray("  Diff"));
   console.log(chalk.gray("  ─────────────────────────────────────────────────────────"));
@@ -58,28 +76,51 @@ export async function runCompare(nameA: string, nameB: string): Promise<void> {
   printRow("Model", a.model, b.model);
   printRow(
     "Sessions",
-    a.sessions.toString(),
-    b.sessions.toString(),
-    diffIndicator(a.sessions, b.sessions, false)
+    metrics.a.sessions.toString(),
+    metrics.b.sessions.toString(),
+    diffIndicator(metrics.a.sessions, metrics.b.sessions, false)
   );
   printRow(
     "Total Cost",
-    "$" + a.totalCost.toFixed(4),
-    "$" + b.totalCost.toFixed(4),
-    diffIndicator(a.totalCost, b.totalCost, true)
+    "$" + metrics.a.totalCost.toFixed(4),
+    "$" + metrics.b.totalCost.toFixed(4),
+    diffIndicator(metrics.a.totalCost, metrics.b.totalCost, true)
+  );
+  printRow(
+    "Cost / Session",
+    "$" + metrics.a.costPerSession.toFixed(4),
+    "$" + metrics.b.costPerSession.toFixed(4),
+    diffIndicator(metrics.a.costPerSession, metrics.b.costPerSession, true)
   );
   printRow(
     "Total Tokens",
-    a.totalTokens.toLocaleString(),
-    b.totalTokens.toLocaleString(),
-    diffIndicator(a.totalTokens, b.totalTokens, true)
+    metrics.a.totalTokens.toLocaleString(),
+    metrics.b.totalTokens.toLocaleString(),
+    diffIndicator(metrics.a.totalTokens, metrics.b.totalTokens, true)
   );
   printRow(
     "Cache Hit Rate",
-    a.cacheHitRate.toFixed(1) + "%",
-    b.cacheHitRate.toFixed(1) + "%",
-    diffIndicator(a.cacheHitRate, b.cacheHitRate, false)
+    metrics.a.cacheHitRate.toFixed(1) + "%",
+    metrics.b.cacheHitRate.toFixed(1) + "%",
+    diffIndicator(metrics.a.cacheHitRate, metrics.b.cacheHitRate, false)
   );
+
+  // Bottom-line verdict
+  if (metrics.a.sessions > 0 && metrics.b.sessions > 0 && metrics.a.costPerSession > 0) {
+    const savingsPct = ((metrics.a.costPerSession - metrics.b.costPerSession) / metrics.a.costPerSession) * 100;
+    console.log();
+    if (savingsPct > 0) {
+      console.log(chalk.green.bold(`  ✓ ${b.name} saves ${savingsPct.toFixed(1)}% per session vs ${a.name}`));
+    } else if (savingsPct < 0) {
+      console.log(chalk.red.bold(`  ✗ ${b.name} costs ${Math.abs(savingsPct).toFixed(1)}% more per session vs ${a.name}`));
+    } else {
+      console.log(chalk.gray(`  = No cost difference per session`));
+    }
+  } else if (metrics.a.sessions === 0 || metrics.b.sessions === 0) {
+    console.log();
+    console.log(chalk.yellow("  ⚠ Not enough sessions to compare."));
+    console.log(chalk.gray("    Run 5+ sessions with each config, then re-compare."));
+  }
 
   console.log(chalk.gray("  ─────────────────────────────────────────────────────────"));
   console.log();
