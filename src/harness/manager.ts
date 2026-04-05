@@ -154,3 +154,74 @@ export function compare(
     b: load(nameB),
   };
 }
+
+/** Metrics derived from sessions that fall within a harness's time window. */
+export interface HarnessMetrics {
+  sessions: number;
+  totalCost: number;
+  costPerSession: number;
+  totalTokens: number;
+  cacheHitRate: number;
+}
+
+/**
+ * Given two harnesses (ordered by savedAt) and all available sessions,
+ * attribute sessions to each harness by timestamp range:
+ *
+ *   Harness A owns: sessions with startedAt < A.savedAt
+ *   Harness B owns: sessions with A.savedAt <= startedAt < B.savedAt
+ *
+ * If A is saved *after* B, the tool swaps them automatically so the
+ * earlier harness is always "before" and the later is "after."
+ */
+export function attributeSessions(
+  harnessA: Harness,
+  harnessB: Harness,
+  sessions: Array<{ startedAt: string; cost: number; tokens: number; cacheHitRate: number }>
+): { a: HarnessMetrics; b: HarnessMetrics } {
+  // Ensure chronological order: earlier harness is "before"
+  const [earlier, later] =
+    new Date(harnessA.savedAt).getTime() <= new Date(harnessB.savedAt).getTime()
+      ? [harnessA, harnessB]
+      : [harnessB, harnessA];
+
+  const cutoff = new Date(earlier.savedAt).getTime();
+  const end = new Date(later.savedAt).getTime();
+
+  const beforeSessions: typeof sessions = [];
+  const afterSessions: typeof sessions = [];
+
+  for (const s of sessions) {
+    const t = new Date(s.startedAt).getTime();
+    if (t < cutoff) {
+      beforeSessions.push(s);
+    } else if (t < end) {
+      afterSessions.push(s);
+    }
+    // Sessions after the later harness's savedAt are excluded —
+    // they belong to a future experiment, not this comparison.
+  }
+
+  function metricsFrom(list: typeof sessions): HarnessMetrics {
+    const count = list.length;
+    const totalCost = list.reduce((s, x) => s + x.cost, 0);
+    const totalTokens = list.reduce((s, x) => s + x.tokens, 0);
+    const cacheHitRate = count > 0
+      ? list.reduce((s, x) => s + x.cacheHitRate, 0) / count
+      : 0;
+    return {
+      sessions: count,
+      totalCost: Math.round(totalCost * 10000) / 10000,
+      costPerSession: count > 0 ? Math.round((totalCost / count) * 10000) / 10000 : 0,
+      totalTokens,
+      cacheHitRate: Math.round(cacheHitRate * 100) / 100,
+    };
+  }
+
+  // Map back to the original A/B order (not chronological)
+  const isSwapped = new Date(harnessA.savedAt).getTime() > new Date(harnessB.savedAt).getTime();
+  return {
+    a: metricsFrom(isSwapped ? afterSessions : beforeSessions),
+    b: metricsFrom(isSwapped ? beforeSessions : afterSessions),
+  };
+}
