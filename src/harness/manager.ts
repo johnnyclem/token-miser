@@ -5,9 +5,9 @@ import {
   mkdirSync,
   readdirSync,
 } from "node:fs";
-import { join, resolve, relative } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
-import type { Harness, HarnessConfig, AggregateData } from "../analyzer/types.js";
+import type { Harness, HarnessConfig } from "../analyzer/types.js";
 
 const HARNESS_DIR = join(process.cwd(), ".token-miser", "harnesses");
 
@@ -15,20 +15,6 @@ function ensureDir(): void {
   if (!existsSync(HARNESS_DIR)) {
     mkdirSync(HARNESS_DIR, { recursive: true });
   }
-}
-
-/** Strip any path-traversal characters to prevent writing outside HARNESS_DIR */
-function sanitizeName(name: string): string {
-  // Allow only alphanumeric, hyphens, underscores, and dots (no slashes, no ..)
-  const clean = name.replace(/[^a-zA-Z0-9_\-.]/g, "");
-  if (!clean) throw new Error("Harness name must contain at least one alphanumeric character.");
-  // Extra safety: resolve the final path and confirm it's inside HARNESS_DIR
-  const target = resolve(HARNESS_DIR, `${clean}.json`);
-  const rel = relative(HARNESS_DIR, target);
-  if (rel.startsWith("..") || rel.includes("/")) {
-    throw new Error(`Invalid harness name: "${name}"`);
-  }
-  return clean;
 }
 
 function readOptionalFile(filePath: string): string | null {
@@ -69,33 +55,24 @@ function readCurrentConfig(): HarnessConfig {
   };
 }
 
-export function save(name: string, description: string, aggregateData?: AggregateData): Harness {
-  const safeName = sanitizeName(name);
+export function save(name: string, description: string): Harness {
   ensureDir();
   const config = readCurrentConfig();
 
-  // Backfill real metrics from aggregate data when available
-  const sessions = aggregateData?.sessionsCount ?? 0;
-  const totalCost = aggregateData?.totalCost ?? 0;
-  const totalTokens = aggregateData
-    ? aggregateData.sessions.reduce((sum, s) => sum + s.tokens, 0)
-    : 0;
-  const cacheHitRate = aggregateData?.cacheHitRate ?? 0;
-
   const harness: Harness = {
-    name: safeName,
+    name,
     description,
     is_active: false,
     model: config.model,
-    sessions,
-    totalCost,
-    totalTokens,
-    cacheHitRate,
+    sessions: 0,
+    totalCost: 0,
+    totalTokens: 0,
+    cacheHitRate: 0,
     config,
     savedAt: new Date().toISOString(),
   };
 
-  const filePath = join(HARNESS_DIR, `${safeName}.json`);
+  const filePath = join(HARNESS_DIR, `${name}.json`);
   writeFileSync(filePath, JSON.stringify(harness, null, 2), "utf-8");
 
   // Also snapshot CLAUDE.md if it exists
@@ -103,7 +80,7 @@ export function save(name: string, description: string, aggregateData?: Aggregat
   const claudeMd = readOptionalFile(claudeMdPath);
   if (claudeMd !== null) {
     writeFileSync(
-      join(HARNESS_DIR, `${safeName}.CLAUDE.md`),
+      join(HARNESS_DIR, `${name}.CLAUDE.md`),
       claudeMd,
       "utf-8"
     );
@@ -132,8 +109,7 @@ export function list(): Harness[] {
 }
 
 export function load(name: string): Harness | null {
-  const safeName = sanitizeName(name);
-  const filePath = join(HARNESS_DIR, `${safeName}.json`);
+  const filePath = join(HARNESS_DIR, `${name}.json`);
   if (!existsSync(filePath)) {
     return null;
   }
