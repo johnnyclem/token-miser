@@ -1,7 +1,11 @@
 import chalk from "chalk";
 import { compare, attributeSessions, type HarnessMetrics } from "../../harness/manager.js";
 import { parseSessions } from "../../analyzer/parser.js";
-import type { Harness } from "../../analyzer/types.js";
+import type { Harness, HarnessConfig } from "../../analyzer/types.js";
+
+function configsIdentical(a: HarnessConfig, b: HarnessConfig): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 function formatVal(val: string | number | undefined, fallback = "—"): string {
   if (val === undefined || val === null) return fallback;
@@ -124,6 +128,14 @@ export async function runCompare(nameA: string, nameB: string): Promise<void> {
 
   console.log(chalk.gray("  ─────────────────────────────────────────────────────────"));
   console.log();
+
+  // Warn if configs are identical — user may not have applied changes between saves
+  if (configsIdentical(a.config, b.config)) {
+    console.log(chalk.yellow("  ⚠ Configurations are identical between these harnesses."));
+    console.log(chalk.gray("    Did you apply changes between saves? Results may reflect"));
+    console.log(chalk.gray("    natural variation rather than a deliberate experiment."));
+    console.log();
+  }
 
   // Config comparison
   console.log(chalk.bold("  Configuration Differences"));
