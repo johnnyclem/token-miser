@@ -92,11 +92,14 @@ export async function runAnalyze(options: {
   }
 
   if (options.dashboard) {
+    const { startDashboardServer } = await import("../server.js");
     const open = await import("open");
-    const dashboardUrl = "http://localhost:5173";
-    console.log(chalk.cyan(`Opening dashboard at ${dashboardUrl}...`));
-    await open.default(dashboardUrl);
-    return;
+    const { url } = await startDashboardServer(data);
+    console.log(chalk.cyan(`  Dashboard running at ${url}`));
+    console.log(chalk.gray("  Press Ctrl+C to stop.\n"));
+    await open.default(url);
+    // Keep process alive so the server stays up
+    await new Promise(() => {});
   }
 
   printSummary(data);

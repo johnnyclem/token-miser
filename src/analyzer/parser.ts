@@ -3,6 +3,8 @@ import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import type { SessionData, ToolUsage, CostCategory } from "./types.js";
 
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB — skip files larger than this
+
 interface RawMessage {
   type?: string;
   message?: {
@@ -41,7 +43,7 @@ function findJsonlFiles(dir: string): string[] {
         const stat = statSync(full);
         if (stat.isDirectory()) {
           walk(full);
-        } else if (entry.endsWith(".jsonl")) {
+        } else if (entry.endsWith(".jsonl") && stat.size <= MAX_FILE_SIZE) {
           files.push(full);
         }
       } catch {
@@ -90,6 +92,22 @@ const TOOL_COLORS = [
   "#8b5cf6", "#ec4899", "#14b8a6", "#f97316",
 ];
 
+// Approximate pricing per million tokens by model family (USD).
+// Used to derive cost-category splits from token counts when costUSD
+// is only available as a lump sum per turn.
+interface ModelPricing { input: number; output: number; cacheRead: number }
+const MODEL_PRICING: Record<string, ModelPricing> = {
+  "sonnet":  { input: 3,    output: 15,   cacheRead: 0.30 },
+  "opus":    { input: 15,   output: 75,   cacheRead: 1.50 },
+  "haiku":   { input: 0.80, output: 4,    cacheRead: 0.08 },
+};
+
+function pricingForModel(model: string): ModelPricing {
+  if (model.includes("opus"))  return MODEL_PRICING.opus;
+  if (model.includes("haiku")) return MODEL_PRICING.haiku;
+  return MODEL_PRICING.sonnet; // default
+}
+
 function buildSessionFromMessages(
   sessionId: string,
   projectName: string,
@@ -101,8 +119,8 @@ function buildSessionFromMessages(
   let totalCacheRead = 0;
   let totalCacheCreation = 0;
   let model = "claude-sonnet-4-20250514";
-  let startTime: string | undefined;
-  let compactions = 0;
+  let firstTimestamp: string | undefined;
+  let lastTimestamp: string | undefined;
 
   const toolCounts = new Map<string, { count: number; tokens: number; cost: number }>();
   const categoryCosts: Record<string, number> = {
@@ -116,8 +134,9 @@ function buildSessionFromMessages(
   };
 
   for (const msg of messages) {
-    if (msg.timestamp && !startTime) {
-      startTime = msg.timestamp;
+    if (msg.timestamp) {
+      if (!firstTimestamp) firstTimestamp = msg.timestamp;
+      lastTimestamp = msg.timestamp;
     }
     if (msg.model) {
       model = msg.model;
@@ -137,32 +156,62 @@ function buildSessionFromMessages(
     const cost = msg.costUSD ?? 0;
 
     if (msgType === "summary" || msgType === "compaction") {
-      compactions++;
       categoryCosts.compaction += cost;
     } else if (role === "assistant") {
       const content = msg.message?.content;
+      const pricing = pricingForModel(model);
+      const inputTokens = msg.tokens?.input ?? 0;
+      const outputTokens = msg.tokens?.output ?? 0;
+      const cacheTokens = msg.tokens?.cache_read ?? 0;
+
+      // Derive input vs output cost from token counts and pricing,
+      // then attribute proportionally rather than using magic ratios.
+      const estInputCost = (inputTokens * pricing.input + cacheTokens * pricing.cacheRead) / 1_000_000;
+      const estOutputCost = (outputTokens * pricing.output) / 1_000_000;
+      const estTotal = estInputCost + estOutputCost;
+      const outputFraction = estTotal > 0 ? estOutputCost / estTotal : 0.5;
+      const inputFraction = 1 - outputFraction;
+
+      // Input portion of this turn goes to system (it re-reads the context)
+      categoryCosts.system += cost * inputFraction;
+
       if (Array.isArray(content)) {
         const hasToolUse = content.some((c) => c.type === "tool_use");
-        if (hasToolUse) {
-          categoryCosts.tool_call += cost * 0.3;
-          categoryCosts.assistant_output += cost * 0.5;
-          categoryCosts.thinking += cost * 0.2;
-          for (const block of content) {
-            if (block.type === "tool_use" && block.name) {
-              const existing = toolCounts.get(block.name) ?? { count: 0, tokens: 0, cost: 0 };
-              existing.count++;
-              existing.tokens += (msg.tokens?.output ?? 0);
-              existing.cost += cost * 0.3;
-              toolCounts.set(block.name, existing);
-            }
-          }
+        const hasThinking = content.some((c) => c.type === "thinking");
+        const toolUseBlocks = content.filter((c) => c.type === "tool_use");
+        const blockTypeCount = (hasToolUse ? 1 : 0) + (hasThinking ? 1 : 0) + 1; // +1 for text
+
+        if (hasToolUse && hasThinking) {
+          // All three present: split output cost three ways
+          const perBlock = cost * outputFraction / blockTypeCount;
+          categoryCosts.thinking += perBlock;
+          categoryCosts.tool_call += perBlock;
+          categoryCosts.assistant_output += cost * outputFraction - perBlock * 2;
+        } else if (hasToolUse) {
+          // Tool use + text, no thinking
+          categoryCosts.tool_call += cost * outputFraction * 0.4;
+          categoryCosts.assistant_output += cost * outputFraction * 0.6;
+        } else if (hasThinking) {
+          // Thinking + text, no tool use
+          categoryCosts.thinking += cost * outputFraction * 0.6;
+          categoryCosts.assistant_output += cost * outputFraction * 0.4;
         } else {
-          categoryCosts.assistant_output += cost * 0.7;
-          categoryCosts.thinking += cost * 0.3;
+          // Text only
+          categoryCosts.assistant_output += cost * outputFraction;
+        }
+
+        for (const block of (Array.isArray(content) ? content : [])) {
+          if (block.type === "tool_use" && block.name) {
+            const existing = toolCounts.get(block.name) ?? { count: 0, tokens: 0, cost: 0 };
+            existing.count++;
+            existing.tokens += outputTokens;
+            existing.cost += cost * outputFraction * (hasThinking ? 1 / blockTypeCount : 0.4);
+            toolCounts.set(block.name, existing);
+          }
         }
       } else {
-        categoryCosts.assistant_output += cost * 0.7;
-        categoryCosts.thinking += cost * 0.3;
+        // Simple text response — all output cost is assistant text
+        categoryCosts.assistant_output += cost * outputFraction;
       }
     } else if (role === "user") {
       categoryCosts.user_prompt += cost;
@@ -216,15 +265,22 @@ function buildSessionFromMessages(
     })
   );
 
-  const durationMs = messages.length * 2500;
-  const mins = Math.floor(durationMs / 60000);
-  const secs = Math.floor((durationMs % 60000) / 1000);
+  // Compute real duration from first/last timestamps
+  let durationStr = "0m 0s";
+  if (firstTimestamp && lastTimestamp) {
+    const start = new Date(firstTimestamp).getTime();
+    const end = new Date(lastTimestamp).getTime();
+    const durationMs = Math.max(0, end - start);
+    const mins = Math.floor(durationMs / 60000);
+    const secs = Math.floor((durationMs % 60000) / 1000);
+    durationStr = `${mins}m ${secs}s`;
+  }
 
   return {
     id: sessionId,
     project: projectName,
-    startedAt: startTime ?? new Date().toISOString(),
-    duration: `${mins}m ${secs}s`,
+    startedAt: firstTimestamp ?? new Date().toISOString(),
+    duration: durationStr,
     model,
     cost: Math.round(totalCost * 10000) / 10000,
     tokens: totalTokens,

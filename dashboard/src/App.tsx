@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { L, he } from './theme';
-import { generateMockData } from './data';
+import { generateMockData, type AggregateData } from './data';
 import MetricCard from './components/MetricCard';
 import Overview from './components/Overview';
 import Breakdown from './components/Breakdown';
@@ -25,8 +25,28 @@ function setTabInURL(tab: Tab) {
   window.history.pushState({}, '', url.toString());
 }
 
+/** Try to load real data from the CLI server, fall back to mock data. */
+function useRealData(): { data: AggregateData; isLive: boolean } {
+  const [liveData, setLiveData] = useState<AggregateData | null>(null);
+
+  useEffect(() => {
+    fetch('/api/data')
+      .then((res) => {
+        if (!res.ok) throw new Error('not available');
+        return res.json();
+      })
+      .then((json) => setLiveData(json as AggregateData))
+      .catch(() => {
+        // No server — use mock data (dev mode)
+      });
+  }, []);
+
+  const mock = useMemo(() => generateMockData(), []);
+  return liveData ? { data: liveData, isLive: true } : { data: mock, isLive: false };
+}
+
 const App: React.FC = () => {
-  const data = useMemo(() => generateMockData(), []);
+  const { data, isLive } = useRealData();
   const [activeTab, setActiveTab] = useState<Tab>(getTabFromURL);
 
   useEffect(() => {
@@ -196,8 +216,16 @@ const App: React.FC = () => {
           fontFamily: he.mono,
         }}
       >
-        token-miser v0.1.0 / Connect to real data:{' '}
-        <code style={{ color: L.accent }}>token-miser analyze aggregate --json | pbcopy</code>
+        token-miser v0.1.0 /{' '}
+        {isLive ? (
+          <span style={{ color: '#10b981' }}>Connected to live data</span>
+        ) : (
+          <>
+            Showing mock data — run{' '}
+            <code style={{ color: L.accent }}>token-miser analyze --dashboard</code>{' '}
+            for real data
+          </>
+        )}
       </footer>
     </div>
   );

@@ -1,12 +1,18 @@
 import chalk from "chalk";
 import { save, list } from "../../harness/manager.js";
+import { parseSessions } from "../../analyzer/parser.js";
+import { aggregate } from "../../analyzer/aggregator.js";
 
 export async function runHarnessSave(
   name: string,
   description?: string
 ): Promise<void> {
   const desc = description ?? `Harness snapshot: ${name}`;
-  const harness = save(name, desc);
+
+  // Parse real session data so the harness records actual metrics
+  const sessions = await parseSessions();
+  const data = aggregate(sessions);
+  const harness = save(name, desc, data);
 
   console.log();
   console.log(chalk.green.bold(`  Harness "${name}" saved successfully.`));
