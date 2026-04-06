@@ -138,7 +138,37 @@ export interface HarnessMetrics {
   costPerSession: number;
   totalTokens: number;
   cacheHitRate: number;
+  /** Per-category cost breakdown for the sessions in this window. */
+  categories: Record<string, number>;
+  /** Per-tool cost breakdown for the sessions in this window. */
+  tools: Record<string, { count: number; cost: number; tokens: number }>;
 }
+
+export interface AttributionResult {
+  a: HarnessMetrics;
+  b: HarnessMetrics;
+  /** The harness that was saved first (chronologically). */
+  earlier: Harness;
+  /** The harness that was saved second (chronologically). */
+  later: Harness;
+  /** Whether A and B were swapped to achieve chronological order. */
+  swapped: boolean;
+  /** ISO date range: [start, end) for the "before" window. */
+  beforeRange: { start: string | null; end: string };
+  /** ISO date range: [start, end) for the "after" window. */
+  afterRange: { start: string; end: string };
+  /** Sessions that fell outside both windows (after the later harness). */
+  excludedCount: number;
+}
+
+export type SessionLike = {
+  startedAt: string;
+  cost: number;
+  tokens: number;
+  cacheHitRate: number;
+  categories?: Array<{ category: string; cost: number }>;
+  tools?: Array<{ tool_name: string; count: number; cost: number; tokens: number }>;
+};
 
 /**
  * Given two harnesses (ordered by savedAt) and all available sessions,
@@ -149,23 +179,28 @@ export interface HarnessMetrics {
  *
  * If A is saved *after* B, the tool swaps them automatically so the
  * earlier harness is always "before" and the later is "after."
+ *
+ * Returns full attribution metadata including per-category and per-tool
+ * breakdowns for each period.
  */
 export function attributeSessions(
   harnessA: Harness,
   harnessB: Harness,
-  sessions: Array<{ startedAt: string; cost: number; tokens: number; cacheHitRate: number }>
-): { a: HarnessMetrics; b: HarnessMetrics } {
+  sessions: SessionLike[]
+): AttributionResult {
+  const aTime = new Date(harnessA.savedAt).getTime();
+  const bTime = new Date(harnessB.savedAt).getTime();
+
   // Ensure chronological order: earlier harness is "before"
-  const [earlier, later] =
-    new Date(harnessA.savedAt).getTime() <= new Date(harnessB.savedAt).getTime()
-      ? [harnessA, harnessB]
-      : [harnessB, harnessA];
+  const swapped = aTime > bTime;
+  const [earlier, later] = swapped ? [harnessB, harnessA] : [harnessA, harnessB];
 
   const cutoff = new Date(earlier.savedAt).getTime();
   const end = new Date(later.savedAt).getTime();
 
-  const beforeSessions: typeof sessions = [];
-  const afterSessions: typeof sessions = [];
+  const beforeSessions: SessionLike[] = [];
+  const afterSessions: SessionLike[] = [];
+  let excludedCount = 0;
 
   for (const s of sessions) {
     const t = new Date(s.startedAt).getTime();
@@ -173,31 +208,63 @@ export function attributeSessions(
       beforeSessions.push(s);
     } else if (t < end) {
       afterSessions.push(s);
+    } else {
+      excludedCount++;
     }
-    // Sessions after the later harness's savedAt are excluded —
-    // they belong to a future experiment, not this comparison.
   }
 
-  function metricsFrom(list: typeof sessions): HarnessMetrics {
+  function metricsFrom(list: SessionLike[]): HarnessMetrics {
     const count = list.length;
     const totalCost = list.reduce((s, x) => s + x.cost, 0);
     const totalTokens = list.reduce((s, x) => s + x.tokens, 0);
     const cacheHitRate = count > 0
       ? list.reduce((s, x) => s + x.cacheHitRate, 0) / count
       : 0;
+
+    // Aggregate per-category costs
+    const categories: Record<string, number> = {};
+    for (const session of list) {
+      for (const cat of session.categories ?? []) {
+        categories[cat.category] = (categories[cat.category] ?? 0) + cat.cost;
+      }
+    }
+
+    // Aggregate per-tool metrics
+    const tools: Record<string, { count: number; cost: number; tokens: number }> = {};
+    for (const session of list) {
+      for (const tool of session.tools ?? []) {
+        const existing = tools[tool.tool_name] ?? { count: 0, cost: 0, tokens: 0 };
+        existing.count += tool.count;
+        existing.cost += tool.cost;
+        existing.tokens += tool.tokens;
+        tools[tool.tool_name] = existing;
+      }
+    }
+
     return {
       sessions: count,
       totalCost: Math.round(totalCost * 10000) / 10000,
       costPerSession: count > 0 ? Math.round((totalCost / count) * 10000) / 10000 : 0,
       totalTokens,
       cacheHitRate: Math.round(cacheHitRate * 100) / 100,
+      categories,
+      tools,
     };
   }
 
   // Map back to the original A/B order (not chronological)
-  const isSwapped = new Date(harnessA.savedAt).getTime() > new Date(harnessB.savedAt).getTime();
+  const earliestSession = beforeSessions.length > 0
+    ? beforeSessions.reduce((min, s) => s.startedAt < min ? s.startedAt : min, beforeSessions[0].startedAt)
+    : null;
+
   return {
-    a: metricsFrom(isSwapped ? afterSessions : beforeSessions),
-    b: metricsFrom(isSwapped ? beforeSessions : afterSessions),
+    a: metricsFrom(swapped ? afterSessions : beforeSessions),
+    b: metricsFrom(swapped ? beforeSessions : afterSessions),
+    earlier,
+    later,
+    swapped,
+    beforeRange: { start: earliestSession, end: earlier.savedAt },
+    afterRange: { start: earlier.savedAt, end: later.savedAt },
+    excludedCount,
   };
 }

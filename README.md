@@ -62,17 +62,37 @@ token-miser compare baseline optimized-v1
 
 ```bash
 # 1. Save your current config as a baseline
-token-miser harness save baseline "Before optimization"
+token-miser harness save baseline "Before cache tweaks"
 
-# 2. Apply one suggestion at a time
-# 3. Run 5+ representative sessions
+# 2. Use Claude normally for a day (or 5+ sessions)
+
+# 3. Make your optimization change (e.g., add .claudeignore rules)
 
 # 4. Save the optimized config
-token-miser harness save optimized-v1 "After thinking cap"
+token-miser harness save optimized-v1 "With better caching"
 
-# 5. Compare results
+# 5. Use Claude for another day with the new config
+
+# 6. Compare results — sessions are attributed by timestamp
 token-miser compare baseline optimized-v1
 ```
+
+### How Timestamp Attribution Works
+
+When you run `compare`, token-miser uses the `savedAt` timestamp on each harness to attribute sessions to time periods:
+
+- **Before baseline**: All sessions before the baseline was saved
+- **Between saves**: Sessions between the baseline and optimized-v1 save times
+
+This means you don't need to tag sessions manually. Just save a harness, use Claude, save another harness, and compare. The tool filters your `~/.claude/projects/` session logs by timestamp automatically.
+
+The compare output shows:
+- **Per-session cost delta** — the headline metric ("saves X% per session")
+- **Per-category breakdown** — which cost categories improved (Tool Results, Thinking, etc.)
+- **Top tools comparison** — per-tool cost changes across the two periods
+- **Config diff** — what settings actually changed between harnesses
+
+Sessions after the later harness are excluded — they belong to a future experiment.
 
 ## License
 
